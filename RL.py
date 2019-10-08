@@ -6,7 +6,6 @@ from tflearn.layers.estimator import regression
 
 from datetime import datetime
 import warnings
-import pickle
 import json
 import os
 warnings.filterwarnings("ignore")
@@ -38,6 +37,7 @@ promotion_value_map = {
     'q': 9
 }
 
+
 def get_action_map(num_iter=1000, curr_map_path=None):
     """
     Get all the possible actions from num_iter simulated games
@@ -63,7 +63,7 @@ def get_action_map(num_iter=1000, curr_map_path=None):
     return action_map
 
 
-def get_board_vector(board, flip=False):
+def get_board_vector(board):
     """
     Get a length-64 vector representing the board
     Vector values represent the type of piece at that positon
@@ -73,16 +73,15 @@ def get_board_vector(board, flip=False):
     :return: np.array (64,)
     """
     vec = np.zeros((64,), dtype="float32")
-    curr_player = board.turn
-    flip_mult = 1 if not flip else -1
     for pos in range(64):
         piece = board.piece_at(pos)
+        # white pieces are positive, black pieces are negative
         if piece:
-            if piece.color == curr_player:
+            if piece.color:
                 piece_mult = 1
             else:
                 piece_mult = -1
-            vec[pos] = flip_mult*piece_mult*int(piece.piece_type)
+            vec[pos] = piece_mult*int(piece.piece_type)
     return vec
 
 
@@ -98,7 +97,11 @@ def make_move(board, move, piece_value_map, promotion_value_map):
     if promotion:
         reward += promotion_value_map[promotion]
     board.push(chess.Move.from_uci(move))
-    new_state = get_board_vector(board, flip=True)
+    if board.is_checkmate():
+        reward += piece_value_map[6]
+    elif board.is_check():
+        reward += piece_value_map[6] / 2
+    new_state = get_board_vector(board)
     if board.is_game_over():
         done = True
     return new_state, reward, done
@@ -107,6 +110,7 @@ def make_move(board, move, piece_value_map, promotion_value_map):
 def neural_network_model(input_size, output_size, learning_rate):
     network = input_data(shape=[None, input_size], name='input')
     network = fully_connected(network, 128, activation='relu')
+    network = fully_connected(network, 256, activation='relu')
     network = fully_connected(network, 128, activation='relu')
     network = fully_connected(network, output_size, activation='softmax')
     network = regression(network,
@@ -116,44 +120,6 @@ def neural_network_model(input_size, output_size, learning_rate):
                          name='targets')
     model = tflearn.DNN(network, tensorboard_dir='log')
     return model
-
-
-def get_training_data(action_map, model, piece_value_map, promotion_value_map,
-                      games=100, epsilon=0.7):
-    board = chess.Board()
-    data = []
-    action_map_value_set = set(
-                        [chess.Move.from_uci(v) for v in action_map.values()])
-    for i in range(games):
-        board.reset()
-        turns = 0
-        while not board.is_stalemate() and not board.is_game_over():
-            state = get_board_vector(board)
-            if np.random.rand() <= epsilon:
-                action = str(np.random.choice(list(board.legal_moves)))
-            elif set(board.legal_moves).isdisjoint(action_map_value_set):
-                # If there are no legal moves from the action_map, pick first
-                # random legal move to continue the game
-                print("Had to choose legal move")
-                action = str(np.random.choice(list(board.legal_moves)))
-            else:
-                action = None
-                ind = 0
-                sorted_action_index_ls = np.flip(
-                    np.argsort(model.predict(state.reshape(1, -1)))[0])
-                while not action:
-                    action = action_map[sorted_action_index_ls[ind]]
-                    if chess.Move.from_uci(action) not in board.legal_moves:
-                        action = None
-                        ind += 1
-            new_state, reward, done = make_move(board, action, piece_value_map,
-                                                promotion_value_map)
-            data.append((state, action, reward, new_state, done))
-            turns += 1
-            if turns % 200 == 0:
-                print(turns)
-        print(i)
-    return data
 
 
 # data.append((state, action, reward, new_state, done))
@@ -223,10 +189,10 @@ def train_model(num_games, model, action_map, piece_value_map,
     return model
 
 
-games_observed = 50
-epsilon = 0.7   # Prob of choosing a random move during simulation
-gamma = 0.1     # (0-1) Amount we care about future moves
-lr = 0.005
+games_observed = 10000
+epsilon = 0.9   # Prob of choosing a random move during simulation
+gamma = 0.9     # (0-1) Amount we care about future moves
+lr = 0.0005
 
 date_str = str(datetime.now()).replace(' ', '_').replace(':', '')
 action_map = get_action_map(100000, 'action_map.json')
@@ -234,11 +200,6 @@ print(len(action_map))
 init_model = neural_network_model(input_size=64,
                                   output_size=len(action_map),
                                   learning_rate=lr)
-# training_data = get_training_data(action_map, init_model, piece_value_map,
-#                                   promotion_value_map, games=games_observed,
-#                                   epsilon=epsilon)
-# with open(os.path.join('training_data', date_str + '.pkl'), 'wb') as fp:
-#     pickle.dump(training_data, fp)
 
 trained_model = train_model(num_games=games_observed,
                             model=init_model,
@@ -247,7 +208,6 @@ trained_model = train_model(num_games=games_observed,
                             promotion_value_map=promotion_value_map,
                             epsilon=epsilon,
                             gamma=gamma)
+os.makedirs(os.path.join('models', date_str))
 trained_model.save(
     os.path.join('models', date_str, 'chess_model.tflearn'))
-
-
